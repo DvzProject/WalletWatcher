@@ -16,6 +16,7 @@ from stellar_base.address import Address
 from stellar_base.horizon import Horizon
 from ripple import Client as RippleClient
 from ripple import Remote as RippleRemote
+
 from threading import Thread
 
 import websocket
@@ -105,6 +106,29 @@ def BTC_UserBalance():
     except Exception as e:
         return jsonify({"error":str(e)})
 
+@app.route('/ripple/userbalance')
+@requires_auth
+def Ripple_UserBalance():
+    try:
+        rem = RippleRemote("wss://s.altnet.rippletest.net:51233", "saDRVTqt9QRvbYZg7ukkgZKyGwzKn")
+        return jsonify(rem.account_info("r9uPy68rJ214jjMerj8g3e17UR4zh4z6an"))
+    except Exception as e:
+        return jsonify({"error":str(e)})
+
+@app.route('/stellar/userbalance')
+@requires_auth
+def Stellar_UserBalance():
+    try:
+        horizon = Horizon(horizon_uri="https://horizon-testnet.stellar.org")
+        ac = horizon.account("GCJILL2KY3NJNZQMBONVNHJMG3CGJFONT2RQHCLTNDM53E42J6543GZV")
+        return jsonify(ac)
+    except Exception as e:
+        return jsonify({"error":str(e)})
+
+
+
+
+
 
 
 
@@ -148,6 +172,7 @@ def StellarPaymentListener():
     address = Address(address="GCJILL2KY3NJNZQMBONVNHJMG3CGJFONT2RQHCLTNDM53E42J6543GZV",
                       horizon_uri="https://horizon-testnet.stellar.org")
     horizon = Horizon(horizon_uri="https://horizon-testnet.stellar.org")
+
     payments = address.payments(cursor=config["cursor"])
     records = payments["_embedded"]["records"]
 
@@ -260,8 +285,11 @@ def RippleWS():
 if __name__ == '__main__':
     #test
 
-    rem = RippleRemote("wss://s.altnet.rippletest.net:51233","saDRVTqt9QRvbYZg7ukkgZKyGwzKn")
-    v = rem.send_payment("rnNMw7mE7w9vHNqmy4zMhU9WHtfS3vGH53",1,None,None,12345)
+   # rem = RippleRemote("wss://s.altnet.rippletest.net:51233","saDRVTqt9QRvbYZg7ukkgZKyGwzKn")
+
+    #print(rem.account_info("r9uPy68rJ214jjMerj8g3e17UR4zh4z6an"))
+
+   # v = rem.send_payment("rnNMw7mE7w9vHNqmy4zMhU9WHtfS3vGH53",1,None,None,12345)
     #rip = RippleClient("wss://s.altnet.rippletest.net:51233")
 
     # asyncio.get_event_loop().run_until_complete(RippleTransactionListener())
