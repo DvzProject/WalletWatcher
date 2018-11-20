@@ -16,9 +16,12 @@ from stellar_base.address import Address
 from stellar_base.horizon import Horizon
 from ripple import Client as RippleClient
 from ripple import Remote as RippleRemote
+from stellar_base.builder import Builder
+import base64
 
+import datetime
 from threading import Thread
-
+import numpy as np
 import websocket
 
 
@@ -44,14 +47,31 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
+def getColdwalletaddr(cc):
+    db = getMONGO()
+    crypt = db["configs"].find_one({"cc": cc})
+    if (crypt == None):
+        return None
+    return crypt["coldwallet"]
 
+def getKeys(cc):
+    db = getMONGO()
+    crypt = db["configs"].find_one({"cc":cc})
+    if(crypt == None):
+        return None
+    keys = crypt["keys"]
+    sp = keys.split(",")
+    return {"private":sp[1],"public":sp[0]}
 
+def getConfig(cc,key):
+    db = getMONGO()
+    crypt = db["configs"].find_one({"cc":cc})
+    if(crypt == None):
+        return None
+    return crypt[key]
 
 def getBTCRPC():
-    rpc_user = "d4P6zbah6RY89u5f4bhJQMNvM7xb94Nt"
-    rpc_password = "jV9gujb5VVPKHVzv9sDvLX27Nv5Nk8mh"
-    BTCRPCURL = "http://%s:%s@46.166.173.10:18332" % (rpc_user, rpc_password)
-    return RPCHost(BTCRPCURL)
+    return RPCHost(getConfig("bitcoin","rpcurl"))
 
 
 def getMONGO():
@@ -110,8 +130,10 @@ def BTC_UserBalance():
 @requires_auth
 def Ripple_UserBalance():
     try:
-        rem = RippleRemote("wss://s.altnet.rippletest.net:51233", "saDRVTqt9QRvbYZg7ukkgZKyGwzKn")
-        return jsonify(rem.account_info("r9uPy68rJ214jjMerj8g3e17UR4zh4z6an"))
+        keys = getKeys("ripple")
+
+        rem = RippleRemote(getConfig("ripple","socket"), keys["private"])
+        return jsonify(rem.account_info(keys["public"]))
     except Exception as e:
         return jsonify({"error":str(e)})
 
@@ -119,8 +141,9 @@ def Ripple_UserBalance():
 @requires_auth
 def Stellar_UserBalance():
     try:
-        horizon = Horizon(horizon_uri="https://horizon-testnet.stellar.org")
-        ac = horizon.account("GCJILL2KY3NJNZQMBONVNHJMG3CGJFONT2RQHCLTNDM53E42J6543GZV")
+        horizon = Horizon(horizon_uri=getConfig("stellar","horizon"))
+        keys = getKeys("stellar")
+        ac = horizon.account(keys["public"])
         return jsonify(ac)
     except Exception as e:
         return jsonify({"error":str(e)})
@@ -148,6 +171,27 @@ class Config(object):
             'args': None,
             'trigger': 'interval',
             'seconds': 1
+        },
+        {
+            'id': 'BitcoinColdWalletTransfer',
+            'func': 'app:BitcoinColdWalletTransfer',
+            'args': None,
+            'trigger': 'interval',
+            'hours': 2
+        },
+        {
+            'id': 'RippleColdWalletTransfer',
+            'func': 'app:RippleColdWalletTransfer',
+            'args': None,
+            'trigger': 'interval',
+            'hours': 2
+        },
+        {
+            'id': 'StellarColdWalletTransfer',
+            'func': 'app:StellarColdWalletTransfer',
+            'args': None,
+            'trigger': 'interval',
+            'hours': 2
         }
     ]
 
@@ -161,17 +205,84 @@ def updatebitcointransaction(t):
     t["confirms"] = transaction["confirmations"]
     return t
 
+def log(op, type, detail):
+    o = {"operation":op,"type":type,"time":datetime.datetime.now(),"detail":detail}
+    db = getMONGO()
+    db["wallet_history"].insert_one(o)
+
+
+
+def StellarColdWalletTransfer():
+    try:
+        horizon = Horizon(horizon_uri=getConfig("stellar","horizon"))
+        keys = getKeys("stellar")
+
+        ac = horizon.account(keys["public"])
+        balances = ac["balances"]
+
+        balance = np.float64(0.0)
+        transfer = np.float64(0.0)
+
+        for b in balances:
+            if(b["asset_type"] == "native"):
+                balance = np.float64( b["balance"] )
+        print("stellar balance : " + str(balance))
+        if(balance < np.float64(2000.000000)):
+            return
+        transfer = balance - np.float64(1000.000000)
+        log("STELLAR_CD_TRANSFER", "INFO", {"totalbalance": str(balance), "transferbalance": str(transfer)})
+        builder = Builder(secret=keys["private"], horizon_uri=getConfig("stellar","horizon"), network='TESTNET')
+        builder.add_text_memo("DVZHWALLET").append_payment_op(destination=getColdwalletaddr("stellar"), amount=str(transfer), asset_code='XLM')
+        builder.sign()
+        response = builder.submit()
+    except Exception as e:
+        log("STELLAR_CD_TRANSFER", "ERROR", e)
+def RippleColdWalletTransfer():
+    try:
+        keys = getKeys("ripple")
+        rem = RippleRemote(getConfig("ripple","socket"), keys["private"])
+        balance = rem.account_info(keys["public"])["Balance"]
+        if(np.uint64(balance) < np.uint64(2000000000)):
+            return
+
+        transfer = np.uint64(balance) - np.uint64(1000000000)
+        log("RIPPLE_CD_TRANSFER", "INFO", {"totalbalance": balance, "transferbalance": str(transfer)})
+        #print("ripple transfer: " + str(transfer))
+        payment = rem.send_payment(getColdwalletaddr("ripple"), transfer,None,None,"10001" )
+
+
+    except Exception as e:
+        log("RIPPLE_CD_TRANSFER", "ERROR", e)
+
+def BitcoinColdWalletTransfer():
+    #lets get btc hw balance
+    try:
+        host = getBTCRPC()
+        tbalance = host.call('getbalance')
+        if(tbalance < 0.20000000):
+            return
+        balance = tbalance - 0.10000000
+        log("BTC_CD_TRANSFER","INFO",{"totalbalance":tbalance,"transferbalance":balance})
+
+        send = host.call('sendtoaddress',getColdwalletaddr("bitcoin"),balance)
+        log("BTC_CD_TRANSFER", "INFO", {"totalbalance": tbalance, "transferbalance": balance,"sendresult":send})
+
+
+
+    except Exception as e:
+        log("BTC_CD_TRANSFER", "ERROR", e)
 
 
 def StellarPaymentListener():
     #NO SSE For version Alpha
     db = getMONGO()
-
     #TODO: Check is config exist or throw something bad
     config = db["configs"].find_one({"cc":"stellar"})
-    address = Address(address="GCJILL2KY3NJNZQMBONVNHJMG3CGJFONT2RQHCLTNDM53E42J6543GZV",
-                      horizon_uri="https://horizon-testnet.stellar.org")
-    horizon = Horizon(horizon_uri="https://horizon-testnet.stellar.org")
+    keys = getKeys("stellar")
+
+    address = Address(address=keys["public"],
+                      horizon_uri=getConfig("stellar","horizon"))
+    horizon = Horizon(horizon_uri=getConfig("stellar","horizon"))
 
     payments = address.payments(cursor=config["cursor"])
     records = payments["_embedded"]["records"]
@@ -194,7 +305,7 @@ def StellarPaymentListener():
         sfrom = r["from"]
         sto = r["to"]
         amount = r["amount"]
-        if(sto != "GCJILL2KY3NJNZQMBONVNHJMG3CGJFONT2RQHCLTNDM53E42J6543GZV"):
+        if(sto != keys["public"]):
             continue
 
         f = db["stellar_history"].find_one({"hash": hash})
@@ -270,13 +381,14 @@ def Ripple_on_close(ws):
     print("### closed ###")
 
 def Ripple_on_open(ws):
-    ws.send("{\"id\": \"DVZHotWalletStream\",\"command\": [\"subscribe\"],\"accounts\": [\"rnNMw7mE7w9vHNqmy4zMhU9WHtfS3vGH53\"],\"streams\":[\"transactions\"]}")
+    keys = getKeys("ripple")
+    ws.send("{\"id\": \"DVZHotWalletStream\",\"command\": [\"subscribe\"],\"accounts\": [\""+keys["public"]+"\"],\"streams\":[\"transactions\"]}")
 
 
 def RippleWS():
     global ripplews
     websocket.enableTrace(True)
-    ripplews = websocket.WebSocketApp("wss://s.altnet.rippletest.net:51233",
+    ripplews = websocket.WebSocketApp(getConfig("ripple","socket"),
                                 on_message=Ripple_on_message,
                                 on_error=Ripple_on_error,
                                 on_close=Ripple_on_close,
@@ -302,7 +414,6 @@ if __name__ == '__main__':
     scheduler = APScheduler()
     scheduler.init_app(app)
     scheduler.start()
-
     thread = Thread(target=RippleWS)
     thread.start()
 
